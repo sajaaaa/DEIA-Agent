@@ -141,6 +141,7 @@ dmypy.json
 # /src/overcooked_ai/overcooked_ai_py/data/planners/*.pkl
 output.txt
 src/openai_key.txt
+src/siliconflow_key.txt
 
 src/GARBAGE
 backups/

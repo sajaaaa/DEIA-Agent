@@ -1,13 +1,8 @@
-"""
-ProAgent Main - 修改版
-将OpenAI API替换为硅基流动(SiliconFlow) API
-使用模型: Qwen/Qwen2-7B-Instruct
-"""
-
 import time
 import datetime
 import os
 import json
+import sys
 from argparse import ArgumentParser
 import numpy as np
 from rich import print as rprint
@@ -18,13 +13,39 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", message=".*cuBLAS factory.*")
+warnings.filterwarnings("ignore", message=".*cuBLAS factory.*") # ignore "Unable to register cuBLAS factory" due to use tf-CPU
+
 
 from distutils.util import strtobool
 def boolean_argument(value):
     """Convert a string value to boolean."""
     return bool(strtobool(value))
 
+
+# ============================================
+# 日志记录器：同时输出到终端和文件
+# ============================================
+class Logger:
+    def __init__(self, log_file):
+        self.terminal = sys.stdout
+        self.log_file = log_file
+        self.log = open(log_file, "w", encoding="utf-8")
+    
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()  # 实时写入
+    
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    
+    def close(self):
+        self.log.close()
+
+
+# import pkg_resources
+# VERSION = pkg_resources.get_distribution("overcooked_ai").version
 import importlib_metadata
 VERSION = importlib_metadata.version("overcooked_ai")
 print(f'\n----This overcook version is {VERSION}----\n')
@@ -34,6 +55,7 @@ from overcooked_ai_py.mdp.overcooked_env import OvercookedEnv
 from overcooked_ai_py.agents.agent import AgentGroup
 from overcooked_ai_py.mdp.actions import Action
 
+
 from utils import NEW_LAYOUTS, OLD_LAYOUTS, make_agent
 
 
@@ -42,8 +64,34 @@ def main(variant):
     layout = variant['layout']
     horizon = variant['horizon']
     episode = variant['episode']
-
     mode = variant['mode']
+    
+    p0_algo = variant['p0']
+    p1_algo = variant['p1']
+    
+    # ============================================
+    # 创建实验目录和日志文件
+    # ============================================
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if variant['log_dir'] is None:
+        log_dir = f"experiments/{timestamp}_{layout}_{p0_algo}_vs_{p1_algo}_{horizon}steps_{episode}ep"
+    else:
+        log_dir = variant['log_dir']
+    
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # 设置日志文件
+    log_file = f"{log_dir}/experiment_log.txt"
+    logger = Logger(log_file)
+    sys.stdout = logger
+    
+    print(f"=" * 60)
+    print(f"Experiment Log")
+    print(f"Timestamp: {timestamp}")
+    print(f"Log Directory: {log_dir}")
+    print(f"=" * 60)
     
     if VERSION == '1.1.0':
         mdp = OvercookedGridworld.from_layout_name(NEW_LAYOUTS[layout])
@@ -53,26 +101,40 @@ def main(variant):
     env = OvercookedEnv(mdp, horizon=horizon)
     env.reset()
 
-    p0_algo = variant['p0']
-    p1_algo = variant['p1']
     print(f"\n===P0 agent: {p0_algo} | P1 agent: {p1_algo}===\n")
 
     start_time = time.time()
     results = []
 
     for i in range(episode):  
+        print(f"\n{'#'*60}")
+        print(f"# Episode {i+1}/{episode}")
+        print(f"{'#'*60}\n")
 
         agents_list = []
         for alg in [p0_algo, p1_algo]:
             if alg == "ProAgent":
-                assert variant['llm_model'] is not None, print(f'you should choose an LLM model')
-                print(f"\n----Use {variant['llm_model']}----\n")
-                llm_model = variant['llm_model']
+                assert variant['gpt_model']!=None, print(f'you should choose a gpt model')
+                print(f"\n----Use {variant['gpt_model']}----\n")
+                gpt_model = variant['gpt_model']
                 retrival_method = variant['retrival_method']
                 K = variant['K']
                 prompt_level = variant['prompt_level']
                 belief_revision = variant['belief_revision']
-                agent = make_agent(alg, mdp, layout, model=llm_model, 
+                agent = make_agent(alg, mdp, layout, model=gpt_model, 
+                                   prompt_level=prompt_level, 
+                                   belief_revision=belief_revision, 
+                                   retrival_method=retrival_method, K=K)
+            elif alg == "ITDP":
+                # ITDP-Agent: 意图感知的任务驱动优先级智能体
+                assert variant['gpt_model']!=None, print(f'you should choose a gpt model')
+                print(f"\n----Use {variant['gpt_model']} with ITDP-Agent (Intent-aware Task-Driven Priority)----\n")
+                gpt_model = variant['gpt_model']
+                retrival_method = variant['retrival_method']
+                K = variant['K']
+                prompt_level = variant['prompt_level']
+                belief_revision = variant['belief_revision']
+                agent = make_agent(alg, mdp, layout, model=gpt_model, 
                                    prompt_level=prompt_level, 
                                    belief_revision=belief_revision, 
                                    retrival_method=retrival_method, K=K)
@@ -92,7 +154,7 @@ def main(variant):
             for t in range(horizon):
                 s_t = env.state
                 print(f'\n>>>>>>>>>>>>>time: {t}<<<<<<<<<<<<<<<<<<<<<\n')
-                print(env.mdp.state_string(s_t).replace('Ã¸', 'o'))   
+                print(env.mdp.state_string(s_t).replace('ø', 'o'))   
 
                 a_t = team.joint_action(s_t) 
                 print(f"\n-----------Controller-----------\n")    
@@ -102,142 +164,122 @@ def main(variant):
 
                 ml_actions = obs.ml_actions
                 skills = f""
-                for i, ml_action in enumerate(ml_actions):
-                    if ml_action is None:
+                for idx, ml_action in enumerate(ml_actions):
+                    if ml_action == None:
                         continue
-                    skills += f"P{i} finished <{ml_action}>. "
+                    skills += f"P{idx} finished <{ml_action}>. "
                 print(skills)
 
                 r_total += reward
-                rprint("[red]" + f'r: {reward} | total: {r_total}\n\n')
+                # 使用普通print代替rprint以便记录到日志
+                print(f'r: {reward} | total: {r_total}\n\n')
 
             ## finish one episode
-            if p0_algo == "ProAgent" or p1_algo == "ProAgent":
+            if p0_algo in ["ProAgent", "ITDP"] or p1_algo in ["ProAgent", "ITDP"]:
                 print(f"\n================\n")
-                try:  # ProAgent id = 0
+                try: # ProAgent/ITDP id = 0
                     print(f"P1's real behavior: {team.agents[0].teammate_ml_actions_dict}")
                     print(f"The infered P1's intention: {team.agents[0].teammate_intentions_dict}")
-                except:  # ProAgent id = 1
+                except: # ProAgent/ITDP id = 1
                     print(f"P0's real behavior: {team.agents[1].teammate_ml_actions_dict}")
                     print(f"The infered P0's intention: {team.agents[1].teammate_intentions_dict}")
                 print(f"\n================\n")
 
+            
         elif mode == 'demo':
             pass
          
         print(f"Episode {i+1}/{episode}: {r_total}\n====\n\n")
         results.append(r_total)
 
+        
+   
     end_time = time.time()
-    print(f"Cost time : {end_time - start_time:.3f}s-----\n\n")
+    total_time = end_time - start_time
+    print(f"Cost time : {total_time:.3f}s-----\n\n")
 
+
+    # ============================================
+    # 保存实验结果
+    # ============================================
     result_dict = {
         "input": variant,
         "raw_results": results,
-        "mean_result": int(np.mean(results)),
+        "mean_result": float(np.mean(results)),
+        "std_result": float(np.std(results)),
+        "max_result": int(np.max(results)),
+        "min_result": int(np.min(results)),
+        "total_time_seconds": total_time,
     }
-    for (k, v) in result_dict.items():
+    
+    print(f"\n{'='*60}")
+    print(f"EXPERIMENT SUMMARY")
+    print(f"{'='*60}")
+    for (k,v) in result_dict.items():
         print(f'{k}: {v}')
 
     if variant['save']:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-
-        if variant['log_dir'] is None and variant['debug']:
-            log_dir = f"experiments/{timestamp}_{layout}_{horizon}_{p0_algo}_{p1_algo}_{episode}numep"
-            if not os.path.exists(log_dir):
-                os.makedirs(log_dir)
+        # 保存JSON结果
+        if p0_algo in ["ProAgent", "ITDP"] or p1_algo in ["ProAgent", "ITDP"]:
+            json_file = f"{log_dir}/results_{gpt_model.replace('/', '_')}_{prompt_level}.json"
         else:
-            log_dir = variant['log_dir']
-
-        print(f"This is {log_dir}")
-        if p0_algo == "ProAgent" or p1_algo == "ProAgent":
-            json_file = f"{log_dir}/results_{episode}_{horizon}_{llm_model.replace('/', '_')}_{prompt_level}_{retrival_method}_{K}.json"
-        else:
-            json_file = f"{log_dir}/results_{episode}_{horizon}.json"
+            json_file = f"{log_dir}/results.json"
+        
         with open(json_file, "w") as f:
             json.dump(result_dict, f, indent=4)
+        
+        print(f"\nResults saved to: {json_file}")
+        print(f"Full log saved to: {log_file}")
+    
+    # 关闭日志
+    sys.stdout = logger.terminal
+    logger.close()
+    
+    print(f"\n[Experiment Complete] Log saved to: {log_dir}")
+    
+    return result_dict
 
 
 if __name__ == '__main__':
-    '''
-    使用硅基流动 Qwen 模型运行示例:
-    python main.py --layout cramped_room --p0 ProAgent --p1 Greedy --horizon 100 --llm_model Qwen/Qwen2-7B-Instruct
-    python main.py --layout cramped_room --p0 ProAgent --p1 BC --horizon 400 -pl l2-ap --llm_model Qwen/Qwen2-7B-Instruct
-    
-    使用其他硅基流动模型:
-    python main.py --layout cramped_room --p0 ProAgent --p1 Greedy --horizon 100 --llm_model Qwen/Qwen2.5-7B-Instruct
-    python main.py --layout cramped_room --p0 ProAgent --p1 Greedy --horizon 100 --llm_model deepseek-ai/DeepSeek-V2.5
-    '''
-    parser = ArgumentParser(description='OvercookedAI Experiment with SiliconFlow API')
 
-    # 基础参数
-    parser.add_argument('--layout', '-l', type=str, default='cramped_room', 
-                        choices=['cramped_room', 'asymmetric_advantages', 'coordination_ring', 'forced_coordination', 'counter_circuit'])
-    parser.add_argument('--p0', type=str, default='Greedy', 
-                        choices=['ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], 
-                        help='Algorithm for P0 agent')
-    parser.add_argument('--p1', type=str, default='Greedy', 
-                        choices=['ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], 
-                        help='Algorithm for P1 agent')
+    '''
+    python main.py --layout cramped_room --p0 Greedy --p1 Greedy --horizon 100
+    python main.py --layout cramped_room --p0 ProAgent --p1 BC --horizon 400 -pl l2-ap
+    python main.py --layout cramped_room --p0 ITDP --p1 BC --horizon 400 -pl l2-ap --gpt_model Qwen/Qwen2.5-7B-Instruct
+    '''
+    parser = ArgumentParser(description='OvercookedAI Experiment')
+
+    # these are basis parses
+    parser.add_argument('--layout', '-l', type=str, default='cramped_room', choices=['cramped_room', 'asymmetric_advantages', 'coordination_ring', 'forced_coordination', 'counter_circuit'])
+    parser.add_argument('--p0',  type=str, default='Greedy', choices=['ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P0 agent 0')
+    parser.add_argument('--p1', type=str, default='Greedy', choices=['ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P1 agent 1')
     parser.add_argument('--horizon', type=int, default=400, help='Horizon steps in one game')
     parser.add_argument('--episode', type=int, default=1, help='Number of episodes')
 
-    # LLM模型参数 - 修改为支持硅基流动模型
-    parser.add_argument('--llm_model', type=str, default='Qwen/Qwen2-7B-Instruct',
-                        choices=[
-                            # 硅基流动 Qwen 模型
-                            'Qwen/Qwen2-7B-Instruct',
-                            'Qwen/Qwen2-72B-Instruct',
-                            'Qwen/Qwen2.5-7B-Instruct',
-                            'Qwen/Qwen2.5-72B-Instruct',
-                            # 硅基流动其他模型
-                            'deepseek-ai/DeepSeek-V2.5',
-                            'THUDM/glm-4-9b-chat',
-                            # OpenAI 模型 (保留兼容)
-                            'gpt-3.5-turbo',
-                            'gpt-3.5-turbo-16k',
-                            'gpt-4',
-                            'gpt-4-0314',
-                            'text-davinci-003',
-                        ],
-                        help='LLM model to use (SiliconFlow or OpenAI)')
-    
-    # 保留旧参数名兼容性
-    parser.add_argument('--gpt_model', type=str, default=None, 
-                        help='[Deprecated] Use --llm_model instead')
-    
-    parser.add_argument('--prompt_level', '-pl', type=str, default='l2-ap', 
-                        choices=['l1-p', 'l2-ap', 'l3-aip'], 
-                        help="'l1-p': make plans directly without CoT; 'l2-ap': plans with analysis; 'l3-aip': plans with analysis and intention.")
-    parser.add_argument('--belief_revision', '-br', type=boolean_argument, default=False, 
-                        help='whether we use belief_revision or not')
-    parser.add_argument('--retrival_method', type=str, default="recent_k", 
-                        choices=['recent_k', 'bert_topk'], 
-                        help='Use similarity-based(BERT, CLIP) retrieval or retrieve recent K history in dialog.')
-    parser.add_argument('--K', type=int, default=1, 
-                        help="The number of dialogues you want to retrieve.")
+    # these parsers are only required when using ProAgent or ITDP.
+    parser.add_argument('--gpt_model', type=str, default='Qwen/Qwen2.5-7B-Instruct', 
+                        choices=['text-davinci-003', 'gpt-3.5-turbo-16k', 'gpt-3.5-turbo-0301', 'gpt-3.5-turbo', 'gpt-4', 'gpt-4-0314',
+                                 'Qwen/Qwen2-7B-Instruct', 'Qwen/Qwen2.5-7B-Instruct', 'Qwen/Qwen2.5-72B-Instruct',
+                                 'deepseek-ai/DeepSeek-V2.5', 'THUDM/glm-4-9b-chat'], 
+                        help='LLM model to use')
+    parser.add_argument('--prompt_level', '-pl', type=str, default='l2-ap', choices=['l1-p', 'l2-ap', 'l3-aip'], help="'l1-p': make plans directly without CoT; 'l2-ap': plans with analysis; 'l3-aip': plans with analysis and intention.")
+    parser.add_argument('--belief_revision', '-br', type=boolean_argument, default=False, help='whether we use belief_revision or not')
+    parser.add_argument('--retrival_method', type=str, default="recent_k", choices=['recent_k', 'bert_topk'], help='Use similarity-based(BERT, CLIP) retrieval or retrieve recent K history in dialog.')
+    parser.add_argument('--K', type=int, default=1, help="The number of dialogues you want to retrieve.")
 
-    # 其他参数
-    parser.add_argument('--mode', type=str, default='exp', 
-                        choices=['exp', 'demo'], 
-                        help='exp mode run step-by-step, demo mode run via traj')                                
-    parser.add_argument('--save', type=boolean_argument, default=True, 
-                        help='Whether save the result')
-    parser.add_argument('--log_dir', type=str, default=None, 
-                        help='dir to save result')
-    parser.add_argument('--debug', type=boolean_argument, default=True, 
-                        help='debug mode')
+    # 
+    parser.add_argument('--mode', type=str, default='exp', choices=['exp', 'demo'], help='exp mode run step-by-step, demo mode run via traj')                                
+    parser.add_argument('--save', type=boolean_argument, default=True, help='Whether save the result')
+    parser.add_argument('--log_dir', type=str, default=None, help='dir to save result')
+    parser.add_argument('--debug', type=boolean_argument, default=True, help='debug mode')
+
 
     args = parser.parse_args()
     variant = vars(args)
 
-    # 处理旧参数兼容性
-    if variant['gpt_model'] is not None:
-        print(f"[WARNING] --gpt_model is deprecated, use --llm_model instead")
-        variant['llm_model'] = variant['gpt_model']
 
     start_time = time.time()
     main(variant)
     end_time = time.time()
     print(f"\n=======Finished all=========\n")
-    print(f"Cost time : {end_time - start_time:.3f}s-----\n\n")
+    print(f"Total time : {end_time - start_time:.3f}s-----\n\n")

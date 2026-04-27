@@ -126,7 +126,7 @@ def main(variant):
                                    belief_revision=belief_revision, 
                                    retrival_method=retrival_method, K=K)
             elif alg == "ITDP":
-                # ITDP-Agent: 意图感知的任务驱动优先级智能体
+                # ITDP-Agent: 意图感知的任务驱动优先级智能体（纯规则，无LLM）
                 assert variant['gpt_model']!=None, print(f'you should choose a gpt model')
                 print(f"\n----Use {variant['gpt_model']} with ITDP-Agent (Intent-aware Task-Driven Priority)----\n")
                 gpt_model = variant['gpt_model']
@@ -134,9 +134,22 @@ def main(variant):
                 K = variant['K']
                 prompt_level = variant['prompt_level']
                 belief_revision = variant['belief_revision']
-                agent = make_agent(alg, mdp, layout, model=gpt_model, 
-                                   prompt_level=prompt_level, 
-                                   belief_revision=belief_revision, 
+                agent = make_agent(alg, mdp, layout, model=gpt_model,
+                                   prompt_level=prompt_level,
+                                   belief_revision=belief_revision,
+                                   retrival_method=retrival_method, K=K)
+            elif alg == "DEIA":
+                # DEIA-Agent: 双重专家意图感知智能体（ITDP预分析 + LLM决策）
+                assert variant['gpt_model'] != None, print(f'you should choose a gpt model')
+                print(f"\n----Use {variant['gpt_model']} with DEIA-Agent (Dual Expert Intent-Aware)----\n")
+                gpt_model = variant['gpt_model']
+                retrival_method = variant['retrival_method']
+                K = variant['K']
+                prompt_level = variant['prompt_level']
+                belief_revision = variant['belief_revision']
+                agent = make_agent(alg, mdp, layout, model=gpt_model,
+                                   prompt_level=prompt_level,
+                                   belief_revision=belief_revision,
                                    retrival_method=retrival_method, K=K)
             elif alg == "BC":
                 agent = make_agent(alg, mdp, layout, seed_id=i)
@@ -175,7 +188,7 @@ def main(variant):
                 print(f'r: {reward} | total: {r_total}\n\n')
 
             ## finish one episode
-            if p0_algo in ["ProAgent", "ITDP"] or p1_algo in ["ProAgent", "ITDP"]:
+            if p0_algo in ["ProAgent", "ITDP", "DEIA"] or p1_algo in ["ProAgent", "ITDP", "DEIA"]:
                 print(f"\n================\n")
                 try: # ProAgent/ITDP id = 0
                     print(f"P1's real behavior: {team.agents[0].teammate_ml_actions_dict}")
@@ -220,7 +233,7 @@ def main(variant):
 
     if variant['save']:
         # 保存JSON结果
-        if p0_algo in ["ProAgent", "ITDP"] or p1_algo in ["ProAgent", "ITDP"]:
+        if p0_algo in ["ProAgent", "ITDP", "DEIA"] or p1_algo in ["ProAgent", "ITDP", "DEIA"]:
             json_file = f"{log_dir}/results_{gpt_model.replace('/', '_')}_{prompt_level}.json"
         else:
             json_file = f"{log_dir}/results.json"
@@ -251,8 +264,8 @@ if __name__ == '__main__':
 
     # these are basis parses
     parser.add_argument('--layout', '-l', type=str, default='cramped_room', choices=['cramped_room', 'asymmetric_advantages', 'coordination_ring', 'forced_coordination', 'counter_circuit'])
-    parser.add_argument('--p0',  type=str, default='Greedy', choices=['ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P0 agent 0')
-    parser.add_argument('--p1', type=str, default='Greedy', choices=['ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P1 agent 1')
+    parser.add_argument('--p0',  type=str, default='Greedy', choices=['DEIA', 'ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P0 agent 0')
+    parser.add_argument('--p1', type=str, default='Greedy', choices=['DEIA', 'ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P1 agent 1')
     parser.add_argument('--horizon', type=int, default=400, help='Horizon steps in one game')
     parser.add_argument('--episode', type=int, default=1, help='Number of episodes')
 

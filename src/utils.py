@@ -12,8 +12,8 @@ from overcooked_ai_py.planning.planners import MediumLevelPlanner, NO_COUNTERS_P
 from overcooked_ai_py.utils import load_dict_from_file, load_pickle
 
 
-# ITDP-Agent导入
-from proagent.proagent import ProMediumLevelAgent, ITDPAgent
+# ITDP/DEIA-Agent导入
+from proagent.proagent import ProMediumLevelAgent, ITDPAgent, DEIAAgent
 
 from collections import defaultdict
 from stable_baselines import GAIL
@@ -76,7 +76,7 @@ def make_agent(alg:str, mdp, layout, **gptargs):
             agent = GreedyHumanModel(mlam)
 
     elif alg == "ITDP":
-        # ITDP-Agent: 意图感知的任务驱动优先级智能体
+        # ITDP-Agent: 意图感知的任务驱动优先级智能体（纯规则，无LLM）
         MLAM_PARAMS = {
             "start_orientations": False,
             "wait_allowed": True,
@@ -89,9 +89,27 @@ def make_agent(alg:str, mdp, layout, **gptargs):
         MLAM_PARAMS["counter_goals"] = counter_locations
         MLAM_PARAMS["counter_drop"] = counter_locations
         MLAM_PARAMS["counter_pickup"] = counter_locations
-        
-        mlam = MediumLevelPlanner.from_pickle_or_compute(mdp, MLAM_PARAMS, force_compute=True).ml_action_manager 
+
+        mlam = MediumLevelPlanner.from_pickle_or_compute(mdp, MLAM_PARAMS, force_compute=True).ml_action_manager
         agent = ITDPAgent(mlam, layout, **gptargs)
+
+    elif alg == "DEIA":
+        # DEIA-Agent: 双重专家意图感知智能体（ITDP预分析 + LLM决策）
+        MLAM_PARAMS = {
+            "start_orientations": False,
+            "wait_allowed": True,
+            "counter_goals": [],
+            "counter_drop": [],
+            "counter_pickup": [],
+            "same_motion_goals": True,
+        }
+        counter_locations = mdp.get_counter_locations()
+        MLAM_PARAMS["counter_goals"] = counter_locations
+        MLAM_PARAMS["counter_drop"] = counter_locations
+        MLAM_PARAMS["counter_pickup"] = counter_locations
+
+        mlam = MediumLevelPlanner.from_pickle_or_compute(mdp, MLAM_PARAMS, force_compute=True).ml_action_manager
+        agent = DEIAAgent(mlam, layout, **gptargs)
 
     elif alg == "ProAgent" or alg == "Greedy":
         MLAM_PARAMS = {

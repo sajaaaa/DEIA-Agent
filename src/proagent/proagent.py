@@ -1513,42 +1513,380 @@ class ITDPAgent(ProMediumLevelAgent):
         soup_ready = kitchen_state.get('soup_ready', False)
         soup_cooking = kitchen_state.get('soup_cooking', False)
         pot_items = kitchen_state.get('pot_items', 0)
-        
+
         warning_msg = None
-        
+
         # === 检查潜在问题（只警告，不覆盖）===
-        
+
         # 规则0：手里有东西不能pickup
         if held is not None and ml_action.startswith('pickup'):
             warning_msg = f"[ITDP-WARNING] LLM chose '{ml_action}' but holding {held}! ITDP suggests: {itdp_recommended}"
-        
+
         # 拿着soup应该deliver
         if held == 'soup' and ml_action != 'deliver_soup':
             warning_msg = f"[ITDP-WARNING] LLM chose '{ml_action}' but holding SOUP! ITDP suggests: deliver_soup"
-        
+
         # 拿着dish的情况
         if held == 'dish':
             if soup_ready and ml_action != 'fill_dish_with_soup':
                 warning_msg = f"[ITDP-WARNING] LLM chose '{ml_action}' but holding DISH + soup ready! ITDP suggests: fill_dish_with_soup"
             elif soup_cooking and ml_action not in ['wait', 'wait(3)', 'wait(5)', 'fill_dish_with_soup']:
                 warning_msg = f"[ITDP-WARNING] LLM chose '{ml_action}' but holding DISH + soup cooking! ITDP suggests: wait or fill_dish_with_soup"
-        
+
         # 拿着食材的情况
         if held in ['onion', 'tomato']:
             if (soup_ready or soup_cooking) and ml_action not in ['place_obj_on_counter', 'wait']:
                 warning_msg = f"[ITDP-WARNING] LLM chose '{ml_action}' but soup ready/cooking! ITDP suggests: place_obj_on_counter"
             elif pot_items < 3 and ml_action not in ['put_onion_in_pot', 'put_tomato_in_pot', 'place_obj_on_counter', 'wait']:
                 warning_msg = f"[ITDP-WARNING] LLM chose '{ml_action}' but holding ingredient! ITDP suggests: put_onion_in_pot"
-        
+
         # 手空时的检查
         if held is None:
             if not soup_ready and not soup_cooking and ml_action in ['pickup_dish', 'fill_dish_with_soup']:
                 warning_msg = f"[ITDP-WARNING] LLM chose '{ml_action}' but no soup! ITDP suggests: pickup_onion"
-        
+
         # 打印警告（如果有）
         if warning_msg:
             print(warning_msg)
             print(f"[LLM DECISION KEPT] Final action remains: {ml_action}")
-        
+
         # 始终返回LLM的决策，不覆盖
         return ml_action
+
+
+# ============================================================
+# DEIA-Agent: Dual Expert Intent-Aware Agent
+# 双重专家意图感知智能体
+# ============================================================
+#
+# 核心创新：解决LLM在协作场景中的三大痛点
+#
+# 痛点1：LLM推理时间长，无法实时协作
+#   → 用规则/贝叶斯预计算结构化上下文，LLM只做最终判断
+#
+# 痛点2：LLM识别队友意图耗时
+#   → BayesianTaskBelief实时维护队友意图概率分布，直接注入提示词
+#
+# 痛点3：被动等待队友行动，协作效率低
+#   → 预判队友最可能做的事，主动选择互补任务
+#
+# 决策流程：
+# 1. ITDP快速预分析（无LLM）
+#    → 队友意图概率分布 P(队友做X) for each X
+#    → 任务瓶颈优先级队列 [B1>B2>B3...]
+#    → 规则推荐动作
+# 2. 将预分析结果注入LLM提示词
+# 3. LLM基于结构化上下文做最终决策（不再从头分析）
+# ============================================================
+
+class DEIAAgent(ITDPAgent):
+    """
+    DEIA-Agent: Dual Expert Intent-Aware Agent
+    双重专家意图感知智能体
+
+    与其他方法对比：
+    - ProAgent : LLM从原始状态推理一切（慢、易出错）
+    - ITDPAgent: 100%规则，不调用LLM
+    - DEIAAgent : 规则预计算上下文 + LLM做最终决策（快且准）
+    """
+
+    def __init__(
+            self,
+            mlam,
+            layout,
+            model='Qwen/Qwen2.5-7B-Instruct',
+            prompt_level='l2-ap',
+            belief_revision=False,
+            retrival_method="recent_k",
+            K=1,
+            auto_unstuck=True,
+            controller_mode='new',
+            debug_mode='N',
+            agent_index=None,
+            outdir=None
+    ):
+        super().__init__(
+            mlam=mlam,
+            layout=layout,
+            model=model,
+            prompt_level=prompt_level,
+            belief_revision=belief_revision,
+            retrival_method=retrival_method,
+            K=K,
+            auto_unstuck=auto_unstuck,
+            controller_mode=controller_mode,
+            debug_mode=debug_mode,
+            agent_index=agent_index,
+            outdir=outdir
+        )
+
+        self._prev_tm_held = None  # 用于追踪队友手持物品变化
+
+        print(f"\n{'='*60}")
+        print(f"[DEIA-Agent] Dual Expert Intent-Aware Agent")
+        print(f"  Mode    : ITDP pre-analysis + LLM final decision")
+        print(f"  Solves  : slow reasoning / passive collab / intent blindness")
+        print(f"{'='*60}\n")
+
+    def reset(self):
+        super().reset()
+        self._prev_tm_held = None
+
+    def action(self, state):
+        """Override: 追踪手持物品变化，为BC等无ml_action队友合成动作信号"""
+        teammate = state.players[1 - self.agent_index]
+        tm_held = teammate.get_object().name if teammate.has_object() else None
+
+        # 从手持物品变化推断队友执行了什么动作（解决BC无ml_action问题）
+        if tm_held != self._prev_tm_held:
+            kitchen_state = self._get_kitchen_state(state)
+            synthetic_action = self._infer_tm_action_from_held(
+                self._prev_tm_held, tm_held, kitchen_state
+            )
+            if synthetic_action:
+                self.itdp.update_teammate_observation(synthetic_action, teammate.position)
+
+        self._prev_tm_held = tm_held
+        return super().action(state)
+
+    def _infer_tm_action_from_held(self, prev_held, curr_held, kitchen_state):
+        """从手持物品前后变化推断队友执行的中层动作"""
+        pot_items = kitchen_state.get('pot_items', 0)
+        soup_ready = kitchen_state.get('soup_ready', False)
+
+        if prev_held is None and curr_held in ['onion', 'tomato']:
+            return f'pickup_{curr_held}'
+        if prev_held is None and curr_held == 'dish':
+            return 'pickup_dish'
+        if prev_held in ['onion', 'tomato'] and curr_held is None:
+            return 'put_onion_in_pot' if pot_items > 0 else 'place_obj_on_counter'
+        if prev_held == 'dish' and curr_held == 'soup':
+            return 'fill_dish_with_soup'
+        if prev_held == 'soup' and curr_held is None:
+            return 'deliver_soup'
+        if prev_held == 'dish' and curr_held is None:
+            return 'place_obj_on_counter'
+        return None
+
+    def _reinforce_belief_from_tm_held(self, tm_held, kitchen_state):
+        """
+        根据队友手持物品直接强化贝叶斯信念。
+
+        predict_intent() 在检测到强信号后会 soft_reset 信念，
+        导致信念始终停留在均匀分布（LOW confidence）。
+        此方法在 decide() 返回后重注入信念，覆盖 soft_reset 的破坏。
+        """
+        from .itdp_module import Bottleneck
+        belief = self.itdp.intent_predictor.bayesian_belief
+        if belief is None or tm_held is None:
+            return
+
+        soup_ready = kitchen_state.get('soup_ready', False)
+
+        # 手持物品 → 对应瓶颈的强先验
+        target_map = {
+            'soup':   Bottleneck.NEED_DELIVERY,
+            'dish':   Bottleneck.NEED_PLATING if soup_ready else Bottleneck.NEED_DISH,
+            'onion':  Bottleneck.NEED_POT_FILLING,
+            'tomato': Bottleneck.NEED_POT_FILLING,
+        }
+        target = target_map.get(tm_held)
+        if target is None:
+            return
+
+        # 目标瓶颈设为0.65，其余均分剩余0.35
+        n = len(belief.bottlenecks)
+        rest = 0.35 / max(n - 1, 1)
+        for b in belief.bottlenecks:
+            belief.belief[b] = 0.65 if b == target else rest
+
+        print(f"[DEIA] Belief reinforced: teammate holding '{tm_held}' → {target.value} = 65%")
+
+    def generate_ml_action(self, state):
+        """DEIA核心决策：规则预分析 + LLM最终决策"""
+
+        # === Step 1: 快速预分析（不调用LLM）===
+        kitchen_state = self._get_kitchen_state(state)
+        my_state = self._get_player_state(state.players[self.agent_index])
+        teammate_state = self._get_player_state(state.players[1 - self.agent_index])
+        reachability = self._check_reachability(state)
+
+        itdp_action, itdp_reason, debug_info = self.itdp.decide(
+            kitchen_state, my_state, teammate_state,
+            self.agent_index, reachability=reachability
+        )
+
+        # decide() 内的 predict_intent() 会 soft_reset 信念，在此重注入
+        self._reinforce_belief_from_tm_held(
+            teammate_state.get('held_object'), kitchen_state
+        )
+        # 重注入后刷新 debug_info 中的置信度，让 prompt 显示真实值
+        debug_info['intent_confidence'] = self.itdp.intent_predictor.get_confidence()
+
+        # === Step 2: 构建结构化上下文块 ===
+        deia_block = self._build_deia_prompt_block(
+            kitchen_state, my_state, teammate_state,
+            itdp_action, itdp_reason, debug_info, reachability
+        )
+
+        # === Step 3: 构建完整提示词（标准状态描述 + DEIA分析块）===
+        if self.prompt_level == "l3-aip" and self.belief_revision:
+            belief_prompt = self.generate_belief_prompt()
+        else:
+            belief_prompt = ''
+        state_prompt = belief_prompt + self.generate_state_prompt(state)
+        full_prompt = state_prompt + deia_block
+
+        print(f"\n### [DEIA] Expert Pre-Analysis Block")
+        print(deia_block)
+
+        # === Step 4: LLM决策 ===
+        state_message = {"role": "user", "content": full_prompt}
+        self.planner.current_user_message = state_message
+        response = self.planner.query(key=self.openai_api_key(), stop='Scene', trace=self.trace)
+
+        if 'wait' not in response:
+            self.planner.add_msg_to_dialog_history(state_message)
+            self.planner.add_msg_to_dialog_history({"role": "assistant", "content": response})
+
+        print(f"\n### [DEIA] LLM Response\n{response}")
+
+        # === Step 5: 解析动作（复用ProMediumLevelAgent的解析器）===
+        ml_action = self.parse_ml_action(response, self.agent_index)
+
+        # --- Fallback #1：格式解析失败 ---
+        # parse_ml_action 解析失败时默认返回 wait(1)，但 response 里并无 "wait"
+        # 此时直接用 ITDP 推荐动作，避免浪费一步
+        if ml_action == 'wait(1)' and 'wait' not in response.lower():
+            print(f"[DEIA] Parse failed (response had no 'wait'), fallback to ITDP: {itdp_action}")
+            ml_action = itdp_action
+
+        # --- Fallback #2：wait 不合理时替换 ---
+        # LLM 选了 wait，但当前没有真实阻塞原因 → 用 ITDP 推荐动作
+        if 'wait' in ml_action:
+            pot_blocked = reachability.get('pot_blocked', False)
+            serve_blocked = reachability.get('serve_blocked', False)
+            is_legitimately_blocked = pot_blocked or serve_blocked
+            if not is_legitimately_blocked and 'wait' not in itdp_action:
+                print(f"[DEIA] LLM chose wait without blocking reason, fallback to ITDP: {itdp_action}")
+                ml_action = itdp_action
+
+        if "wait" not in ml_action:
+            self.planner.add_msg_to_dialog_history({"role": "assistant", "content": ml_action})
+
+        print(f"[DEIA] Player {self.agent_index} final action: {ml_action}")
+        self.current_ml_action_steps = 0
+
+        if "wait" in ml_action:
+            import re as _re
+            match = _re.search(r'wait\((\d+)\)', ml_action)
+            self.time_to_wait = int(match.group(1)) if match else 3
+
+        return ml_action
+
+    def _build_deia_prompt_block(self, kitchen_state, my_state, teammate_state,
+                                  itdp_action, itdp_reason, debug_info, reachability):
+        """构建DEIA结构化分析块，注入LLM提示词"""
+
+        my_held = my_state.get('held_object') or 'nothing'
+        tm_held = teammate_state.get('held_object') or 'nothing'
+
+        intent_block = self._format_intent_distribution_block()
+        teammate_handling = debug_info.get('teammate_handling', [])
+        intent_conf = debug_info.get('intent_confidence', 0.0)
+        conf_label = "HIGH" if intent_conf > 0.6 else "MEDIUM" if intent_conf > 0.3 else "LOW"
+        tm_handling_str = ', '.join(teammate_handling) if teammate_handling else 'unknown'
+
+        bottleneck_block = self._format_bottleneck_block(kitchen_state)
+
+        reach_lines = []
+        for loc in ['pot', 'serve', 'onion', 'dish']:
+            ok = "OK" if reachability.get(loc, True) else "BLOCKED(wall)"
+            blk = " [teammate blocking, consider waiting]" if reachability.get(f'{loc}_blocked', False) else ""
+            reach_lines.append(f"  {loc:<8}: {ok}{blk}")
+        reach_block = "\n".join(reach_lines)
+
+        sep = "=" * 58
+        return f"""
+
+{sep}
+[DEIA Pre-Analysis] Instant expert system (no LLM needed here)
+{sep}
+[Teammate Intent Distribution] (Bayesian inference from observations)
+{intent_block}
+  --> Most likely handling : {tm_handling_str}
+  --> Inference confidence  : {conf_label} ({intent_conf:.0%})
+
+[Task Priority Queue] (what the kitchen needs most urgently)
+{bottleneck_block}
+
+[Reachability Status]
+{reach_block}
+
+[Expert Recommendation]
+  Action    : {itdp_action}
+  Reasoning : {itdp_reason}
+  Logic     : pick highest-priority task that teammate is NOT handling
+{sep}
+[YOUR DECISION]
+You are holding  : {my_held}
+Teammate holding : {tm_held}
+Teammate likely doing : {tm_handling_str}
+
+Instructions (read carefully):
+  1. Do NOT re-derive what teammate is doing — use the distribution above.
+  2. Do NOT re-analyze task priorities — use the queue above.
+  3. Pick the highest-priority task that teammate is NOT doing.
+  4. If the expert recommendation matches your state, use it.
+  5. Only override if you hold something incompatible — state reason briefly.
+  6. WAIT IS LAST RESORT: only choose wait(N) if a target location is physically
+     blocked by your teammate right now. NEVER wait just to be cautious or safe.
+     If in doubt, take the expert recommendation — acting beats waiting.
+
+Valid actions: pickup_onion, pickup_dish, put_onion_in_pot, fill_dish_with_soup,
+               deliver_soup, place_obj_on_counter, wait(N) [only if truly blocked]
+
+Player {self.agent_index}: [your action here]
+{sep}
+"""
+
+    def _format_intent_distribution_block(self):
+        """格式化队友意图概率分布（ASCII可视化）"""
+        if not self.itdp.intent_predictor.bayesian_belief:
+            return "  (Bayesian inference not available)"
+
+        belief = self.itdp.intent_predictor.bayesian_belief.belief
+        sorted_items = sorted(belief.items(), key=lambda x: x[1], reverse=True)
+
+        lines = []
+        for bottleneck, prob in sorted_items:
+            if prob < 0.02:
+                continue
+            filled = int(prob * 20)
+            bar = '#' * filled + '-' * (20 - filled)
+            lines.append(f"  {bottleneck.value:<22} {prob:>5.1%}  [{bar}]")
+
+        return "\n".join(lines) if lines else "  (no observations yet — uniform prior)"
+
+    def _format_bottleneck_block(self, kitchen_state):
+        """格式化任务瓶颈优先级队列"""
+        bottlenecks = self.itdp.pipeline_analyzer.analyze(kitchen_state)
+
+        urgency_labels = {
+            0: "[CRITICAL]", 1: "[CRITICAL]",
+            2: "[HIGH    ]", 3: "[MEDIUM  ]",
+            4: "[LOW     ]", 5: "[LOW     ]"
+        }
+
+        lines = []
+        seen_types = set()
+        for bn in bottlenecks:
+            if bn.type in seen_types:
+                continue
+            seen_types.add(bn.type)
+            label = urgency_labels.get(bn.priority, "[LOW     ]")
+            lines.append(f"  {label} {bn.description:<38} --> {bn.required_action}")
+            if len(lines) >= 5:
+                break
+
+        return "\n".join(lines) if lines else "  (no bottlenecks detected)"

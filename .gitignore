@@ -162,5 +162,9 @@ roadmap.md
 # Paper related
 paper/
 
+# Claude Code local files
+.claude/memory/
+.claude/settings.local.json
+
 src/agents
 

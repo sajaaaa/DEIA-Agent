@@ -597,8 +597,8 @@ class ITDPCoordinator:
                 action = "pickup_dish"
                 reason = "[ITDP] Fallback: get dish (cannot reach onion)"
             else:
-                action = "wait(3)"
-                reason = "[ITDP] Fallback: waiting (limited reachability)"
+                action = "wait(1)"
+                reason = "[ITDP] Fallback: waiting for counter delivery (limited reachability)"
         
         # 卡住检测
         action = self._check_stuck(action)
@@ -649,7 +649,7 @@ class ITDPCoordinator:
             if can_reach_serve:
                 if serve_blocked:
                     # 送餐点被队友暂时挡住，等待
-                    return 'wait(3)', '[FORCED] Holding soup, serve blocked by teammate → wait'
+                    return 'wait(1)', '[FORCED] Holding soup, serve blocked by teammate → wait'
                 else:
                     return 'deliver_soup', '[FORCED] Holding soup → must deliver'
             else:
@@ -660,7 +660,7 @@ class ITDPCoordinator:
             if soup_ready:
                 if can_reach_pot:
                     if pot_blocked:
-                        return 'wait(3)', '[FORCED] Holding dish + soup ready, pot blocked → wait for teammate'
+                        return 'wait(1)', '[FORCED] Holding dish + soup ready, pot blocked → wait for teammate'
                     else:
                         return 'fill_dish_with_soup', '[FORCED] Holding dish + soup ready → plate it'
                 else:
@@ -668,7 +668,7 @@ class ITDPCoordinator:
             elif soup_cooking:
                 if can_reach_pot:
                     if pot_blocked:
-                        return 'wait(3)', '[FORCED] Holding dish + soup cooking, pot blocked → wait for teammate'
+                        return 'wait(1)', '[FORCED] Holding dish + soup cooking, pot blocked → wait for teammate'
                     else:
                         return 'fill_dish_with_soup', '[FORCED] Holding dish + soup cooking → go to pot and wait'
                 else:
@@ -676,7 +676,7 @@ class ITDPCoordinator:
             elif pot_items >= 3:
                 if can_reach_pot:
                     if pot_blocked:
-                        return 'wait(3)', '[FORCED] Holding dish + pot full, blocked → wait for teammate'
+                        return 'wait(1)', '[FORCED] Holding dish + pot full, blocked → wait for teammate'
                     else:
                         return 'fill_dish_with_soup', '[FORCED] Holding dish + pot full → go to pot'
                 else:
@@ -693,7 +693,7 @@ class ITDPCoordinator:
                 if can_reach_pot:
                     if pot_blocked:
                         # 锅被队友暂时挡住，等待而不是放柜台
-                        return 'wait(3)', '[FORCED] Holding ingredient, pot blocked by teammate → wait'
+                        return 'wait(1)', '[FORCED] Holding ingredient, pot blocked by teammate → wait'
                     else:
                         return 'put_onion_in_pot', '[FORCED] Holding ingredient → put in pot'
                 else:

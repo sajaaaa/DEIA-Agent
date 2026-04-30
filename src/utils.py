@@ -93,8 +93,10 @@ def make_agent(alg:str, mdp, layout, **gptargs):
         mlam = MediumLevelPlanner.from_pickle_or_compute(mdp, MLAM_PARAMS, force_compute=True).ml_action_manager
         agent = ITDPAgent(mlam, layout, **gptargs)
 
-    elif alg == "DEIA":
+    elif alg in ["DEIA", "DEIA_no_intent", "DEIA_no_priority"]:
         # DEIA-Agent: 双重专家意图感知智能体（ITDP预分析 + LLM决策）
+        # DEIA_no_intent: 消融 - 去掉贝叶斯意图模块
+        # DEIA_no_priority: 消融 - 去掉任务优先级队列
         MLAM_PARAMS = {
             "start_orientations": False,
             "wait_allowed": True,
@@ -108,8 +110,14 @@ def make_agent(alg:str, mdp, layout, **gptargs):
         MLAM_PARAMS["counter_drop"] = counter_locations
         MLAM_PARAMS["counter_pickup"] = counter_locations
 
+        ablation = None
+        if alg == "DEIA_no_intent":
+            ablation = 'no_intent'
+        elif alg == "DEIA_no_priority":
+            ablation = 'no_priority'
+
         mlam = MediumLevelPlanner.from_pickle_or_compute(mdp, MLAM_PARAMS, force_compute=True).ml_action_manager
-        agent = DEIAAgent(mlam, layout, **gptargs)
+        agent = DEIAAgent(mlam, layout, ablation_mode=ablation, **gptargs)
 
     elif alg == "ProAgent" or alg == "Greedy":
         MLAM_PARAMS = {

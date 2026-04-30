@@ -138,10 +138,10 @@ def main(variant):
                                    prompt_level=prompt_level,
                                    belief_revision=belief_revision,
                                    retrival_method=retrival_method, K=K)
-            elif alg == "DEIA":
-                # DEIA-Agent: 双重专家意图感知智能体（ITDP预分析 + LLM决策）
+            elif alg in ["DEIA", "DEIA_no_intent", "DEIA_no_priority"]:
+                # DEIA-Agent 及消融变体
                 assert variant['gpt_model'] != None, print(f'you should choose a gpt model')
-                print(f"\n----Use {variant['gpt_model']} with DEIA-Agent (Dual Expert Intent-Aware)----\n")
+                print(f"\n----Use {variant['gpt_model']} with {alg}----\n")
                 gpt_model = variant['gpt_model']
                 retrival_method = variant['retrival_method']
                 K = variant['K']
@@ -188,7 +188,8 @@ def main(variant):
                 print(f'r: {reward} | total: {r_total}\n\n')
 
             ## finish one episode
-            if p0_algo in ["ProAgent", "ITDP", "DEIA"] or p1_algo in ["ProAgent", "ITDP", "DEIA"]:
+            if p0_algo in ["ProAgent", "ITDP", "DEIA", "DEIA_no_intent", "DEIA_no_priority"] or \
+               p1_algo in ["ProAgent", "ITDP", "DEIA", "DEIA_no_intent", "DEIA_no_priority"]:
                 print(f"\n================\n")
                 try: # ProAgent/ITDP id = 0
                     print(f"P1's real behavior: {team.agents[0].teammate_ml_actions_dict}")
@@ -264,8 +265,8 @@ if __name__ == '__main__':
 
     # these are basis parses
     parser.add_argument('--layout', '-l', type=str, default='cramped_room', choices=['cramped_room', 'asymmetric_advantages', 'coordination_ring', 'forced_coordination', 'counter_circuit'])
-    parser.add_argument('--p0',  type=str, default='Greedy', choices=['DEIA', 'ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P0 agent 0')
-    parser.add_argument('--p1', type=str, default='Greedy', choices=['DEIA', 'ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P1 agent 1')
+    parser.add_argument('--p0',  type=str, default='Greedy', choices=['DEIA', 'DEIA_no_intent', 'DEIA_no_priority', 'ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P0 agent 0')
+    parser.add_argument('--p1', type=str, default='Greedy', choices=['DEIA', 'DEIA_no_intent', 'DEIA_no_priority', 'ITDP', 'ProAgent', 'Greedy', 'COLE', 'FCP', 'MEP', 'PBT', 'SP', 'BC', 'Random', 'Stay', 'Human'], help='Algorithm for P1 agent 1')
     parser.add_argument('--horizon', type=int, default=400, help='Horizon steps in one game')
     parser.add_argument('--episode', type=int, default=1, help='Number of episodes')
 

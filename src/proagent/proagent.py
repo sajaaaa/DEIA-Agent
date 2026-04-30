@@ -1603,7 +1603,8 @@ class DEIAAgent(ITDPAgent):
             controller_mode='new',
             debug_mode='N',
             agent_index=None,
-            outdir=None
+            outdir=None,
+            ablation_mode=None   # None | 'no_intent' | 'no_priority'
     ):
         super().__init__(
             mlam=mlam,
@@ -1620,10 +1621,14 @@ class DEIAAgent(ITDPAgent):
             outdir=outdir
         )
 
-        self._prev_tm_held = None  # 用于追踪队友手持物品变化
+        self.ablation_mode = ablation_mode
+        self._prev_tm_held = None   # 用于追踪队友手持物品变化
+        self._just_placed_item = None  # 刚放到柜台的物品类型
+        self._just_placed_cooldown = 0  # 冷却步数，期间不捡同类物品
 
+        mode_str = f" [ablation={ablation_mode}]" if ablation_mode else ""
         print(f"\n{'='*60}")
-        print(f"[DEIA-Agent] Dual Expert Intent-Aware Agent")
+        print(f"[DEIA-Agent] Dual Expert Intent-Aware Agent{mode_str}")
         print(f"  Mode    : ITDP pre-analysis + LLM final decision")
         print(f"  Solves  : slow reasoning / passive collab / intent blindness")
         print(f"{'='*60}\n")
@@ -1631,6 +1636,8 @@ class DEIAAgent(ITDPAgent):
     def reset(self):
         super().reset()
         self._prev_tm_held = None
+        self._just_placed_item = None
+        self._just_placed_cooldown = 0
 
     def action(self, state):
         """Override: 追踪手持物品变化，为BC等无ml_action队友合成动作信号"""
@@ -1711,6 +1718,12 @@ class DEIAAgent(ITDPAgent):
         teammate_state = self._get_player_state(state.players[1 - self.agent_index])
         reachability = self._check_reachability(state)
 
+        # 刚放置冷却计时
+        if self._just_placed_cooldown > 0:
+            self._just_placed_cooldown -= 1
+            if self._just_placed_cooldown == 0:
+                self._just_placed_item = None
+
         itdp_action, itdp_reason, debug_info = self.itdp.decide(
             kitchen_state, my_state, teammate_state,
             self.agent_index, reachability=reachability
@@ -1771,11 +1784,28 @@ class DEIAAgent(ITDPAgent):
                 print(f"[DEIA] LLM chose wait without blocking reason, fallback to ITDP: {itdp_action}")
                 ml_action = itdp_action
 
+        # --- Fallback #3：刚放置冷却拦截 ---
+        # place_obj_on_counter 后 N 步内不捡同类物品，避免"抢自己食材"死循环
+        if self._just_placed_item and self._just_placed_cooldown > 0:
+            blocked_pickup = f'pickup_{self._just_placed_item}'
+            if ml_action == blocked_pickup:
+                print(f"[DEIA] Cooldown active ({self._just_placed_cooldown} steps), "
+                      f"skip {ml_action} to let teammate collect")
+                ml_action = 'wait(1)'
+
         if "wait" not in ml_action:
             self.planner.add_msg_to_dialog_history({"role": "assistant", "content": ml_action})
 
         print(f"[DEIA] Player {self.agent_index} final action: {ml_action}")
         self.current_ml_action_steps = 0
+
+        # 记录放置事件，启动冷却（5步内不捡同类物品）
+        if ml_action == 'place_obj_on_counter':
+            my_held = my_state.get('held_object')
+            if my_held in ['onion', 'tomato', 'dish']:
+                self._just_placed_item = my_held
+                self._just_placed_cooldown = 5
+                print(f"[DEIA] Placed '{my_held}' on counter, cooldown=5 steps")
 
         if "wait" in ml_action:
             import re as _re
@@ -1799,6 +1829,16 @@ class DEIAAgent(ITDPAgent):
 
         bottleneck_block = self._format_bottleneck_block(kitchen_state)
 
+        # 消融模式：替换对应模块内容
+        if self.ablation_mode == 'no_intent':
+            intent_block = "  (Ablation: intent module disabled — no teammate inference provided)"
+            tm_handling_str = 'unknown'
+            conf_label = "N/A"
+        elif self.ablation_mode == 'no_priority':
+            bottleneck_block = "  (Ablation: priority queue disabled — no task ranking provided)"
+            itdp_action = 'unknown'
+            itdp_reason = '[Ablation] no priority guidance'
+
         reach_lines = []
         for loc in ['pot', 'serve', 'onion', 'dish']:
             ok = "OK" if reachability.get(loc, True) else "BLOCKED(wall)"
@@ -1807,11 +1847,23 @@ class DEIAAgent(ITDPAgent):
         reach_block = "\n".join(reach_lines)
 
         sep = "=" * 58
+
+        # forced_coordination 专用提示：两个agent被墙隔开，只能通过柜台传递物品
+        forced_hint = ""
+        if self.layout == 'forced_coordination':
+            forced_hint = f"""
+[Layout Note] FORCED COORDINATION: You and teammate are separated by a wall.
+  Items can ONLY be exchanged via the counter in the middle.
+  - If you CAN reach the onion dispenser: pickup_onion then place_obj_on_counter
+  - If you CANNOT reach onion but CAN reach pot: wait(1) for teammate to pass onion,
+    then pickup_onion from counter, then put_onion_in_pot
+  - Never stay idle — if nothing to pick up, do place_obj_on_counter or wait(1).
+"""
         return f"""
 
 {sep}
 [DEIA Pre-Analysis] Instant expert system (no LLM needed here)
-{sep}
+{sep}{forced_hint}
 [Teammate Intent Distribution] (Bayesian inference from observations)
 {intent_block}
   --> Most likely handling : {tm_handling_str}

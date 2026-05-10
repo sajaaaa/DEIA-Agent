@@ -341,10 +341,13 @@ class TeammateIntentPredictor:
         self.teammate_position_history = deque(maxlen=history_size)
         # 持物历史：用于检测反复拿放行为
         self.held_history = deque(maxlen=16)
-        
+
         # 贝叶斯信念
         self.bayesian_belief = BayesianTaskBelief(beta=beta) if use_bayesian else None
-        
+
+        # 动态通道选择：交互步数计数
+        self.step_count = 0
+
         # 统计
         self.rule_count = 0
         self.bayesian_count = 0
@@ -356,12 +359,15 @@ class TeammateIntentPredictor:
         if teammate_pos:
             self.teammate_position_history.append(teammate_pos)
     
-    def predict_intent(self, teammate_state: Dict, kitchen_state: Dict, 
+    def predict_intent(self, teammate_state: Dict, kitchen_state: Dict,
                         my_agent_index: int = 0) -> Tuple[Set[Bottleneck], str]:
         """
         预测队友正在处理哪个/哪些瓶颈
-        
-        融合规则方法和贝叶斯方法
+
+        通道选择策略（动态）：
+        - 早期（step<30）或贝叶斯置信度低（conf<0.35）：显式通道主导，强信号直接返回
+        - 中期（conf 0.35~0.6）：强信号做软更新，贝叶斯与规则结果取并集
+        - 后期（conf>=0.6）：贝叶斯主导，强信号仅触发 soft_reset，不覆盖结果
         """
         held = teammate_state.get('held_object')
         handling = set()
@@ -369,52 +375,103 @@ class TeammateIntentPredictor:
 
         # 记录持物历史（每步都更新，用于反复拿放检测）
         self.held_history.append(held)
+        self.step_count += 1
 
         # 更新贝叶斯信念（不管是否使用）
         if self.bayesian_belief:
             self.bayesian_belief.update(teammate_state, kitchen_state)
 
-        # === 强信号：使用规则方法（最可靠）===
+        # 当前贝叶斯置信度
+        conf = self.bayesian_belief.get_confidence() if self.bayesian_belief else 0.0
+
+        # 通道模式：explicit=显式主导，mixed=融合，bayesian=贝叶斯主导
+        if self.step_count < 30 or conf < 0.35:
+            channel_mode = 'explicit'
+        elif conf < 0.6:
+            channel_mode = 'mixed'
+        else:
+            channel_mode = 'bayesian'
+
+        # === 强信号处理 ===
 
         if held == 'soup':
             self.rule_count += 1
-            handling.add(Bottleneck.NEED_DELIVERY)
-            reasons.append(f"[Rule] Holding soup → DELIVERY")
-            if self.bayesian_belief:
+            if channel_mode == 'bayesian':
+                # 贝叶斯主导：soup 是极强信号，仍然直接信任
                 self.bayesian_belief._soft_reset(0.5)
+                handling.add(Bottleneck.NEED_DELIVERY)
+                reasons.append(f"[Bayesian-dominant] Holding soup → DELIVERY (conf={conf:.0%})")
+            else:
+                handling.add(Bottleneck.NEED_DELIVERY)
+                reasons.append(f"[Explicit] Holding soup → DELIVERY")
+                if self.bayesian_belief:
+                    self.bayesian_belief._soft_reset(0.5)
             return handling, "; ".join(reasons)
 
         if held == 'dish':
             self.rule_count += 1
             if kitchen_state.get('soup_ready'):
-                # 检测反复拿放：dish 在最近16步内出现又消失超过2次
+                # 检测反复拿放
                 if self._detect_repeated_pickup_drop('dish', threshold=2):
-                    # 队友反复拿放盘子，意图不可信，降级为弱信号
                     reasons.append(f"[Rule] Holding dish but repeated pickup/drop detected → intent unreliable")
                     if self.bayesian_belief:
                         self.bayesian_belief._soft_reset(0.7)
                     handling = self.bayesian_belief.get_high_prob_bottlenecks(threshold=0.15) if self.bayesian_belief else set()
                     return handling, "; ".join(reasons)
-                handling.add(Bottleneck.NEED_PLATING)
-                reasons.append(f"[Rule] Holding dish + soup ready → PLATING")
+
+                if channel_mode == 'explicit':
+                    handling.add(Bottleneck.NEED_PLATING)
+                    reasons.append(f"[Explicit] Holding dish + soup ready → PLATING (step={self.step_count})")
+                    if self.bayesian_belief:
+                        self.bayesian_belief._soft_reset(0.5)
+                    return handling, "; ".join(reasons)
+                elif channel_mode == 'mixed':
+                    # 规则结果 + 贝叶斯高概率结果取并集
+                    handling.add(Bottleneck.NEED_PLATING)
+                    if self.bayesian_belief:
+                        handling |= self.bayesian_belief.get_high_prob_bottlenecks(threshold=0.2)
+                        self.bayesian_belief._soft_reset(0.7)
+                    reasons.append(f"[Mixed] dish+soup_ready + Bayesian (conf={conf:.0%})")
+                    return handling, "; ".join(reasons)
+                else:  # bayesian
+                    # 贝叶斯主导：dish 只做软更新，结果以贝叶斯为准
+                    if self.bayesian_belief:
+                        self.bayesian_belief._soft_reset(0.7)
+                        handling = self.bayesian_belief.get_high_prob_bottlenecks(threshold=0.15)
+                    reasons.append(f"[Bayesian-dominant] dish+soup_ready, Bayesian leads (conf={conf:.0%})")
+                    return handling, "; ".join(reasons)
             else:
                 handling.add(Bottleneck.NEED_DISH)
                 handling.add(Bottleneck.WAITING_COOK)
                 reasons.append(f"[Rule] Holding dish → DISH preparation")
-            if self.bayesian_belief:
-                self.bayesian_belief._soft_reset(0.5)
-            return handling, "; ".join(reasons)
-        
+                if self.bayesian_belief:
+                    self.bayesian_belief._soft_reset(0.5)
+                return handling, "; ".join(reasons)
+
         if held in ['onion', 'tomato']:
             self.rule_count += 1
-            handling.add(Bottleneck.NEED_POT_FILLING)
-            handling.add(Bottleneck.NEED_INGREDIENT)
-            reasons.append(f"[Rule] Holding {held} → POT_FILLING")
-            # 规则方法被使用时，软重置贝叶斯信念
-            if self.bayesian_belief:
-                self.bayesian_belief._soft_reset(0.5)
-            return handling, "; ".join(reasons)
-        
+            if channel_mode == 'explicit':
+                handling.add(Bottleneck.NEED_POT_FILLING)
+                handling.add(Bottleneck.NEED_INGREDIENT)
+                reasons.append(f"[Explicit] Holding {held} → POT_FILLING (step={self.step_count})")
+                if self.bayesian_belief:
+                    self.bayesian_belief._soft_reset(0.5)
+                return handling, "; ".join(reasons)
+            elif channel_mode == 'mixed':
+                handling.add(Bottleneck.NEED_POT_FILLING)
+                handling.add(Bottleneck.NEED_INGREDIENT)
+                if self.bayesian_belief:
+                    handling |= self.bayesian_belief.get_high_prob_bottlenecks(threshold=0.2)
+                    self.bayesian_belief._soft_reset(0.7)
+                reasons.append(f"[Mixed] {held} + Bayesian (conf={conf:.0%})")
+                return handling, "; ".join(reasons)
+            else:  # bayesian
+                if self.bayesian_belief:
+                    self.bayesian_belief._soft_reset(0.7)
+                    handling = self.bayesian_belief.get_high_prob_bottlenecks(threshold=0.15)
+                reasons.append(f"[Bayesian-dominant] {held}, Bayesian leads (conf={conf:.0%})")
+                return handling, "; ".join(reasons)
+
         # === 弱信号：使用贝叶斯方法 ===
         if self.use_bayesian and self.bayesian_belief:
             self.bayesian_count += 1

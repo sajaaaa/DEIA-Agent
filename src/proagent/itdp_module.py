@@ -335,10 +335,12 @@ class TeammateIntentPredictor:
     def __init__(self, history_size: int = 5, use_bayesian: bool = True, beta: float = 0.9):
         self.history_size = history_size
         self.use_bayesian = use_bayesian
-        
+
         # 历史记录
         self.teammate_action_history = deque(maxlen=history_size)
         self.teammate_position_history = deque(maxlen=history_size)
+        # 持物历史：用于检测反复拿放行为
+        self.held_history = deque(maxlen=16)
         
         # 贝叶斯信念
         self.bayesian_belief = BayesianTaskBelief(beta=beta) if use_bayesian else None
@@ -364,32 +366,41 @@ class TeammateIntentPredictor:
         held = teammate_state.get('held_object')
         handling = set()
         reasons = []
-        
+
+        # 记录持物历史（每步都更新，用于反复拿放检测）
+        self.held_history.append(held)
+
         # 更新贝叶斯信念（不管是否使用）
         if self.bayesian_belief:
             self.bayesian_belief.update(teammate_state, kitchen_state)
-        
+
         # === 强信号：使用规则方法（最可靠）===
-        
+
         if held == 'soup':
             self.rule_count += 1
             handling.add(Bottleneck.NEED_DELIVERY)
             reasons.append(f"[Rule] Holding soup → DELIVERY")
-            # 规则方法被使用时，软重置贝叶斯信念
             if self.bayesian_belief:
                 self.bayesian_belief._soft_reset(0.5)
             return handling, "; ".join(reasons)
-        
+
         if held == 'dish':
             self.rule_count += 1
             if kitchen_state.get('soup_ready'):
+                # 检测反复拿放：dish 在最近16步内出现又消失超过2次
+                if self._detect_repeated_pickup_drop('dish', threshold=2):
+                    # 队友反复拿放盘子，意图不可信，降级为弱信号
+                    reasons.append(f"[Rule] Holding dish but repeated pickup/drop detected → intent unreliable")
+                    if self.bayesian_belief:
+                        self.bayesian_belief._soft_reset(0.7)
+                    handling = self.bayesian_belief.get_high_prob_bottlenecks(threshold=0.15) if self.bayesian_belief else set()
+                    return handling, "; ".join(reasons)
                 handling.add(Bottleneck.NEED_PLATING)
                 reasons.append(f"[Rule] Holding dish + soup ready → PLATING")
             else:
                 handling.add(Bottleneck.NEED_DISH)
                 handling.add(Bottleneck.WAITING_COOK)
                 reasons.append(f"[Rule] Holding dish → DISH preparation")
-            # 规则方法被使用时，软重置贝叶斯信念
             if self.bayesian_belief:
                 self.bayesian_belief._soft_reset(0.5)
             return handling, "; ".join(reasons)
@@ -442,7 +453,19 @@ class TeammateIntentPredictor:
             reasons.append("Cannot infer teammate intent")
         
         return handling, "; ".join(reasons)
-    
+
+    def _detect_repeated_pickup_drop(self, item: str, threshold: int = 2) -> bool:
+        """检测队友是否反复拿起又放下某个物品。
+        统计 held_history 中 item→非item 的转换次数，超过 threshold 则认为行为异常。
+        """
+        transitions = 0
+        prev = None
+        for h in self.held_history:
+            if prev == item and h != item:
+                transitions += 1
+            prev = h
+        return transitions >= threshold
+
     def get_confidence(self) -> float:
         """推断置信度"""
         if self.bayesian_belief:

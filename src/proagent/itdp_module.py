@@ -193,7 +193,7 @@ class BayesianTaskBelief:
         # ========================================
         # 修复：每次更新前先应用衰减，防止信念过度集中
         # ========================================
-        decay_factor = 0.95  # 每步衰减5%向均匀分布靠拢
+        decay_factor = 0.98  # 每步衰减2%向均匀分布靠拢，允许信念更快收敛
         n = len(self.bottlenecks)
         uniform = 1.0 / n
         for b in self.bottlenecks:
@@ -217,26 +217,10 @@ class BayesianTaskBelief:
                 self.belief[b] /= total
         else:
             self._soft_reset(0.5)
-        
-        # ========================================
-        # 修复：限制最大概率，防止100%置信度
-        # ========================================
-        max_prob = 0.90  # 最大概率不超过90%
-        need_renormalize = False
-        for b in self.bottlenecks:
-            if self.belief[b] > max_prob:
-                self.belief[b] = max_prob
-                need_renormalize = True
-        
-        if need_renormalize:
-            # 重新归一化
-            total = sum(self.belief.values())
-            for b in self.bottlenecks:
-                self.belief[b] /= total
-        
+
         self.last_state = teammate_state.copy()
         return self.belief.copy()
-    
+
     def _compute_q_value(self, bottleneck: Bottleneck, held: Optional[str],
                          pot_items: int, soup_ready: bool) -> float:
         """近似Q值（模拟逆规划）"""
@@ -305,11 +289,8 @@ class BayesianTaskBelief:
             return True
         
         # 新增检测：手持物品从有到无，或从无到有
-        if (last_held is None and curr_held is not None):
-            return True  # 捡起了东西
-        if (last_held is not None and curr_held is None):
-            return True  # 放下了东西
-        
+        # 已移除：捡起/放下本身不代表任务切换，过于敏感会导致信念频繁重置
+
         return False
     
     def _soft_reset(self, decay: float = 0.3):

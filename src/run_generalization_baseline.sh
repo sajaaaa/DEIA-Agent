@@ -82,7 +82,7 @@ run_one () {
   local log_dir="${BASE_DIR}/${layout}/${opp}_${deia_pos}"
   mkdir -p "${log_dir}"
 
-  cmd=(python3 main.py
+  cmd=(/home/aj/miniconda3/envs/proagent/bin/python3 main.py
     --layout "${layout}"
     --p0 "${p0}"
     --p1 "${p1}"
